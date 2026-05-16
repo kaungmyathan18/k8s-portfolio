@@ -1,0 +1,88 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: my-api-slo-rules
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: my-api.slo
+    interval: 30s
+    rules:
+
+    # SLI — success rate (non-5xx responses)
+    - record: job:http_requests_total:rate5m
+      expr: |
+        sum(rate(http_requests_total[5m])) by (job)
+
+    - record: job:http_errors_total:rate5m
+      expr: |
+        sum(rate(http_requests_total{status_code=~"5.."}[5m])) by (job)
+
+    # Error rate ratio — this is your SLI
+    - record: job:error_rate:ratio_rate5m
+      expr: |
+        job:http_errors_total:rate5m
+        /
+        job:http_requests_total:rate5m
+
+    # Burn rate over 1 hour window
+    - record: job:error_rate:ratio_rate1h
+      expr: |
+        sum(rate(http_requests_total{status_code=~"5.."}[1h])) by (job)
+        /
+        sum(rate(http_requests_total[1h])) by (job)
+
+    # Burn rate over 6 hour window
+    - record: job:error_rate:ratio_rate6h
+      expr: |
+        sum(rate(http_requests_total{status_code=~"5.."}[6h])) by (job)
+        /
+        sum(rate(http_requests_total[6h])) by (job)
+
+  - name: my-api.alerts
+    rules:
+
+    # Fast burn — critical alert
+    # Burning 14x faster than budget allows over 1h
+    # Will exhaust 30-day budget in ~2 days
+    - alert: ErrorBudgetFastBurn
+      expr: |
+        job:error_rate:ratio_rate1h > (14 * 0.001)
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Fast error budget burn on {{ $labels.job }}"
+        description: >
+          Error rate {{ $value | humanizePercentage }} is burning
+          error budget 14x faster than sustainable.
+          At this rate the monthly budget will be exhausted in 2 days.
+
+    # Slow burn — warning alert
+    # Burning 2x faster than budget allows over 6h
+    - alert: ErrorBudgetSlowBurn
+      expr: |
+        job:error_rate:ratio_rate6h > (2 * 0.001)
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Slow error budget burn on {{ $labels.job }}"
+        description: >
+          Error rate {{ $value | humanizePercentage }} is burning
+          error budget 2x faster than sustainable over 6 hours.
+
+    # Latency SLO — p99 above 500ms
+    - alert: LatencySLOBreach
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job)
+        ) > 0.5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "p99 latency SLO breach on {{ $labels.job }}"
+        description: "p99 latency is {{ $value }}s, exceeding 500ms SLO"
